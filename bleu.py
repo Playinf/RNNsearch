@@ -1,23 +1,10 @@
 # bleu.py
-# code modified from nltk.align.bleu
 # author: Playinf
 # email: playinf@stu.xmu.edu.cn
 
 import math
 
-
-def count_ngrams(seq, n):
-    counts = {}
-    length = len(seq)
-
-    for i in range(length):
-        if i + n <= length:
-            ngram = " ".join(seq[i : i + n])
-            if ngram not in counts:
-                counts[ngram] = 0
-            counts[ngram] += 1
-
-    return counts
+from collections import Counter
 
 
 def closest_length(candidate, references):
@@ -43,14 +30,17 @@ def shortest_length(references):
 
 
 def modified_precision(candidate, references, n):
-    counts = count_ngrams(candidate, n)
+    tngrams = len(candidate) + 1 - n
+    counts = Counter([tuple(candidate[i : i + n]) for i in range(tngrams)])
 
     if len(counts) == 0:
         return 0, 0
 
     max_counts = {}
     for reference in references:
-        ref_counts = count_ngrams(reference, n)
+        rngrams = len(reference) + 1 - n
+        ngrams = [tuple(reference[i : i + n]) for i in range(rngrams)]
+        ref_counts = Counter(ngrams)
         for ngram in counts:
             mcount = 0 if ngram not in max_counts else max_counts[ngram]
             rcount = 0 if ngram not in ref_counts else ref_counts[ngram]
@@ -76,17 +66,12 @@ def brevity_penalty(trans, refs, mode="closest"):
         else:
             bp_r += closest_length(candidate, references)
 
-    bp = 1.0
-
-    if bp_c <= bp_r:
-        bp = math.exp(1.0 - bp_r / bp_c)
-
-    return bp
+    return math.exp(min(0, 1.0 - bp_r / bp_c))
 
 
 # trans: a list of tokenized sentence
 # refs: a list of list of tokenized reference sentences
-def bleu(trans, refs, bp="closest", smooth=False, n=4, weight=None):
+def bleu(trans, refs, bp="closest", smooth=False, n=4, weights=None):
     p_norm = [0 for i in range(n)]
     p_denorm = [0 for i in range(n)]
 
@@ -109,8 +94,15 @@ def bleu(trans, refs, bp="closest", smooth=False, n=4, weight=None):
         else:
             bleu_n[i] = math.log(float(p_norm[i]) / float(p_denorm[i]))
 
+    if weights:
+        if len(weights) != n:
+            raise ValueError("len(weights) != n: invalid weight number")
+        log_precision = sum([bleu_n[i] * weights[i] for i in range(n)])
+    else:
+        log_precision = sum(bleu_n) / float(n)
+
     bp = brevity_penalty(trans, refs, bp)
 
-    bleu = bp * math.exp(sum(bleu_n) / float(n))
+    bleu = bp * math.exp(log_precision)
 
     return bleu

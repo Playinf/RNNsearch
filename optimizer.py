@@ -2,11 +2,89 @@
 # author: Playinf
 # email: playinf@stu.xmu.edu.cn
 
-import updates
 import tensorflow as tf
 
-from nn import function
-from tensorflow.python.framework.ops import colocate_with
+from utils import function
+
+
+def sgd_update(grad, var, lr):
+    delta = lr * grad
+    return tf.assign_sub(var, delta)
+
+
+def adam_update(grad, var, a_t, m, v, lr, beta1, beta2, eps):
+    m_t = beta1 * m + (1 - beta1) * grad
+    v_t = beta2 * v + (1 - beta2) * tf.square(grad)
+    delta = a_t * m_t / (tf.sqrt(v_t) + eps)
+
+    update_mt = tf.assign(m, m_t)
+    update_vt = tf.assign(v, v_t)
+    update_delta = tf.assign_sub(var, delta)
+
+    return tf.group(update_mt, update_vt, update_delta)
+
+
+def rmsprop_update(grad, var, ms, mg, lr, rho, eps):
+    new_ms = rho * ms + (1.0 - rho) * tf.square(grad)
+    new_mg = rho * mg + (1.0 - rho) * grad
+
+    delta = lr * grad / tf.sqrt(new_ms - tf.square(new_mg) + eps)
+
+    update_ms = tf.assign(ms, new_ms)
+    update_mg = tf.assign(mg, new_mg)
+    update_var = tf.assign_sub(var, delta)
+
+    return tf.group(update_ms, update_mg, update_var)
+
+
+def gradient_updates(grads_and_vars):
+    updates = []
+
+    for grad, var in grads_and_vars:
+        if isinstance(grad, tf.Tensor):
+            updates.append(tf.assign(var, grad))
+        else:
+            new_var = tf.assign(var, tf.zeros_like(var))
+            updates.append(tf.scatter_add(new_var, grad.indices, grad.values))
+
+    return tf.group(*updates)
+
+
+def sgd_updates(grads_and_vars, lr):
+    updates = []
+    for grad, var in grads_and_vars:
+        updates.append(sgd_update(grad, var, lr))
+
+    return tf.group(*updates)
+
+
+def adam_updates(grads_and_vars, slot_vars, lr, beta1, beta2, eps):
+    updates = []
+    t = slot_vars[0]
+    slot_vars = slot_vars[1:]
+
+    new_t = t + 1
+    a = lr * tf.sqrt(1 - tf.pow(beta2, new_t)) / (1 - tf.pow(beta1, new_t))
+
+    updates.append(tf.assign(t, new_t))
+
+    for gv, sv in zip(grads_and_vars, slot_vars):
+        grad, var = gv
+        m, v = sv
+        updates.append(adam_update(grad, var, a, m, v, lr, beta1, beta2, eps))
+
+    return tf.group(*updates)
+
+
+def rmsprop_updates(grads_and_vars, slot_vars, lr, rho, eps):
+    updates = []
+
+    for gv, sv in zip(grads_and_vars, slot_vars):
+        grad, var = gv
+        ms, mg = sv
+        updates.append(rmsprop_update(grad, var, ms, mg, lr, rho, eps))
+
+    return tf.group(*updates)
 
 
 def create_zeros_slot(primary, name, dtype=None):
@@ -14,8 +92,7 @@ def create_zeros_slot(primary, name, dtype=None):
         dtype = primary.dtype
     shape = primary.get_shape().as_list()
     init_val = tf.zeros_initializer(shape, dtype=dtype)
-    with colocate_with(primary):
-        var = tf.Variable(init_val, name=name, trainable=False)
+    var = tf.Variable(init_val, name=name, trainable=False)
     return var
 
 
@@ -62,7 +139,7 @@ class optimizer:
             gvars_and_vars.append((slotvar, var))
             grads_and_gvars.append([grad, slotvar])
 
-        grad_updates = updates.grad_updates(grads_and_gvars)
+        grad_updates = gradient_updates(grads_and_gvars)
         placeholders = []
 
         if "algorithm" not in option:
@@ -73,7 +150,7 @@ class optimizer:
             lr = tf.placeholder(tf.float32, [])
             defaults = [('alpha', 1.0)]
             placeholders.append(lr)
-            var_updates = updates.sgd_updates(gvars_and_vars, lr)
+            var_updates = sgd_updates(gvars_and_vars, lr)
         elif option["algorithm"] == "rmsprop":
             lr = tf.placeholder(tf.float32, [])
             rho = tf.placeholder(tf.float32, [])
@@ -91,7 +168,7 @@ class optimizer:
             placeholders.append(rho)
             placeholders.append(eps)
             defaults = [('alpha', 1e-2), ('rho', 0.99), ('epsilon', 1e-8)]
-            var_updates = updates.rmsprop_updates(gvars_and_vars, svars,
+            var_updates = rmsprop_updates(gvars_and_vars, svars,
                                                   lr, rho, eps)
         elif option["algorithm"] == "adam":
             lr = tf.placeholder(tf.float32, [])
@@ -99,7 +176,7 @@ class optimizer:
             beta2 = tf.placeholder(tf.float32, [])
             eps = tf.placeholder(tf.float32, [])
 
-            t = tf.Variable(0.0, name="adam/t", dtype=tf.float32,
+            t = tf.Variable(0.0, name="adam_t", dtype=tf.float32,
                             trainable=False)
             varlist = [t]
             svars = [t]
@@ -116,7 +193,7 @@ class optimizer:
             placeholders.append(eps)
             defaults = [("alpha", 1e-3), ("beta1", 0.9), ("beta2", 0.999),
                         ("epsilon", 1e-8)]
-            var_updates = updates.adam_updates(gvars_and_vars, svars,
+            var_updates = adam_updates(gvars_and_vars, svars,
                                                lr, beta1, beta2, eps)
         else:
             raise ValueError("unknown algorithm %s" % option["algorithm"])
