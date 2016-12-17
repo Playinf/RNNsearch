@@ -4,7 +4,7 @@
 
 import numpy as np
 
-from utils import flatten, pack_sequence_as
+from tensorflow.python.util import nest
 
 
 # score: a beam_size * num_vars matrix, represent current score
@@ -36,10 +36,10 @@ def select_nbest(nested, indices):
     if not isinstance(nested, (list, tuple)):
         return nested[indices]
 
-    flat_list = flatten(nested)
+    flat_list = nest.flatten(nested)
     selected_list = [item[indices] for item in flat_list]
 
-    return pack_sequence_as(selected_list, nested)
+    return nest.pack_sequence_as(nested, selected_list)
 
 
 class beam:
