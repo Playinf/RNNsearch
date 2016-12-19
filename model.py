@@ -68,6 +68,43 @@ def encoder(cell, inputs, sequence_length, hidden_size, dtype=None,
     return outputs
 
 
+# precompute mapped attention states to speed up decoding
+def map_attention_states(attention_states, attn_size, scope=None):
+    with tf.variable_scope(scope or "attention"):
+        hidden_size = attention_states.get_shape().as_list()[2]
+        shape = tf.shape(attention_states)
+        batched_states = tf.reshape(attention_states, [-1, hidden_size])
+        mapped_states = linear(batched_states, attn_size, False,
+                               scope="annotation_w")
+        mapped_states = tf.reshape(mapped_states,
+                                   [shape[0], shape[1], attn_size])
+
+    return mapped_states
+
+
+def attention(query, mapped_states, attn_size, attention_mask=None,
+              scope=None):
+    with tf.variable_scope(scope or "attention"):
+        mapped_query = linear(query, attn_size, False, scope="query_w")
+        mapped_query = mapped_query[None, :, :]
+
+        batch = tf.shape(query)[0]
+        hidden = tf.tanh(mapped_query + mapped_states)
+        hidden = tf.reshape(hidden, [-1, attn_size])
+
+        with tf.variable_scope("attention"):
+            score = linear(hidden, 1, False, scope="attention_v")
+
+        exp_score = tf.exp(score)
+        exp_score = tf.reshape(exp_score, [-1, batch])
+
+        if attention_mask is not None:
+            exp_score = exp_score * attention_mask
+            alpha = exp_score / tf.reduce_sum(exp_score, 0)[None, :]
+
+        return alpha[:, :, None]
+
+
 def decoder(cell, inputs, initial_state, attention_states, attention_length,
             sequence_length, attention_size=None, dtype=None, scope=None):
     if inputs is None:
@@ -96,34 +133,7 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
         initial_state = cell.zero_state(batch, dtype)
 
     with tf.variable_scope(scope or "decoder"):
-        with tf.variable_scope("attention"):
-            hidden_size = attention_states.get_shape().as_list()[2]
-            shape = tf.shape(attention_states)
-            batched_states = tf.reshape(attention_states, [-1, hidden_size])
-            mapped_states = linear(batched_states, attn_size, False,
-                                   scope="annotation_w")
-            mapped_states = tf.reshape(mapped_states,
-                                       [shape[0], shape[1], attn_size])
-
-        def attention(query):
-            with tf.variable_scope("attention"):
-                mapped_query = linear(query, attn_size, False, scope="query_w")
-                mapped_query = mapped_query[None, :, :]
-
-            hidden = tf.tanh(mapped_query + mapped_states)
-            hidden = tf.reshape(hidden, [-1, attn_size])
-
-            with tf.variable_scope("attention"):
-                score = linear(hidden, 1, False, scope="attention_v")
-
-            exp_score = tf.exp(score)
-            exp_score = tf.reshape(exp_score, [-1, batch])
-
-            if attention_mask is not None:
-                exp_score = exp_score * attention_mask
-                alpha = exp_score / tf.reduce_sum(exp_score, 0)[None, :]
-
-            return alpha[:, :, None]
+        mapped_states = map_attention_states(attention_states, attn_size)
 
         input_ta = tf.TensorArray(tf.float32, time_steps,
                                   tensor_array_name="input_array")
@@ -136,7 +146,7 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
         input_ta = input_ta.unpack(inputs)
 
         def loop(time, alpha_ta, output_ta, context_ta, state):
-            alpha = attention(state)
+            alpha = attention(state, mapped_states, attn_size, attention_mask)
             context = tf.reduce_sum(alpha * attention_states, 0)
 
             inputs = input_ta.read(time)
@@ -240,13 +250,13 @@ class rnnsearch:
             mask = tf.transpose(mask)
             cost = tf.reduce_mean(tf.reduce_sum(crossent * mask, 0))
 
-        train_inputs = [src_seq, src_len, tgt_seq, tgt_len]
-        train_outputs = [cost]
+        training_inputs = [src_seq, src_len, tgt_seq, tgt_len]
+        training_outputs = [cost]
+        evaluate = function(training_inputs, training_outputs)
 
+        # encoding
         encoding_inputs = [src_seq, src_len]
         encoding_outputs = [annotation, initial_state]
-
-        evaluate = function(train_inputs, train_outputs)
         encode = function(encoding_inputs, encoding_outputs)
 
         # decoding graph
@@ -262,48 +272,54 @@ class rnnsearch:
 
             target_inputs = tf.gather(target_embedding, prev_words)
             target_inputs = target_inputs + target_bias
-            tgt_len = tf.ones([tf.shape(target_inputs)[0]], tf.int32)
 
-            cond = tf.equal(prev_words, 0)
             # zeros out embedding if y is 0
+            cond = tf.equal(prev_words, 0)
             cond = tf.cast(cond, tf.float32)
             target_inputs = target_inputs * (1.0 - tf.expand_dims(cond, 1))
 
-            target_inputs = target_inputs[None, :, :]
-            sequence_length = tf.ones([tf.shape(prev_words)[0]], tf.int32)
+            attention_mask = tf.sequence_mask(src_len, dtype=tf.float32)
+            attention_mask = tf.transpose(attention_mask)
 
-            # initial_state is just a placeholder here
-            decoder_outputs = decoder(cell, target_inputs, initial_state,
-                                      annotation, src_len, sequence_length,
-                                      attn_size)
+            with tf.variable_scope("decoder"):
+                mapped_states = map_attention_states(annotation, attn_size)
+                alpha = attention(initial_state, mapped_states, attn_size,
+                                  attention_mask)
+                context = tf.reduce_sum(alpha * annotation, 0)
+                output, next_state = cell([target_inputs, context],
+                                          initial_state)
 
-            all_output, all_context, all_alpha, final_state = decoder_outputs
-
-            target_inputs = tf.reshape(target_inputs, [-1, emb_size])
-            prev_state = tf.reshape(initial_state, [-1, hidden_size])
-            all_context = tf.reshape(all_context, [-1, 2 * hidden_size])
-
-            features = [prev_state, target_inputs, all_context]
+            features = [initial_state, target_inputs, context]
             hidden = maxout(features, hidden_size / 2, 2, True)
             readout = linear(hidden, emb_size, False,  scope="deepout")
             logits = linear(readout, tvocab_size, True, scope="prediction")
             probs = tf.nn.softmax(logits)
 
-        prediction_inputs = [prev_words, prev_state, all_context]
+        precomputation_inputs = [annotation]
+        precomputation_outputs = [mapped_states]
+        precompute = function(precomputation_inputs, precomputation_outputs)
+
+        alignment_inputs = [initial_state, annotation, mapped_states, src_len]
+        alignment_outputs = [alpha, context]
+        align = function(alignment_inputs, alignment_outputs)
+
+        prediction_inputs = [prev_words, initial_state, context]
         prediction_outputs = [probs]
         predict = function(prediction_inputs, prediction_outputs)
 
-        generation_inputs = [prev_words, initial_state, annotation, src_len]
-        generation_outputs = [final_state, all_context]
+        generation_inputs = [prev_words, initial_state, context]
+        generation_outputs = [next_state]
         generate = function(generation_inputs, generation_outputs)
 
         self.cost = cost
-        self.inputs = train_inputs
-        self.outputs = train_outputs
+        self.inputs = training_inputs
+        self.outputs = training_outputs
+        self.align = align
         self.encode = encode
         self.predict = predict
         self.generate = generate
         self.evaluate = evaluate
+        self.precompute = precompute
         self.parameter = tf.trainable_variables()
 
 
@@ -326,8 +342,8 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
         minlen = seq.shape[time_dim] / 2
 
     seq_len = np.array([seq.shape[time_dim]])
-
     annotation, initial_state = model.encode(seq, seq_len)
+    mapped_states = model.precompute(annotation)
 
     initial_beam = beam(size)
     # </s>
@@ -350,8 +366,10 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
         # prediction
         batch_seq_len = np.repeat(seq_len, num, 0)
         batch_annot = np.repeat(annotation, num, batch_dim)
-        dummy_state, context = model.generate(last_words, state, batch_annot,
-                                              batch_seq_len)
+        batch_mannot = np.repeat(mapped_states, num, batch_dim)
+        alpha, context = model.align(state, batch_annot, batch_mannot,
+                                     batch_seq_len)
+
         prob_dist = model.predict(last_words, state, context)
 
         # select nbest
@@ -379,17 +397,13 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
             break
 
         state = select_nbest(state, batch_indices)
+        context = select_nbest(context, batch_indices)
 
         # generate next state
         candidate = next_beam.candidate
         num = len(candidate)
         current_words = np.array(map(lambda t: t[-1], candidate), "int32")
-
-        batch_seq_len = np.repeat(seq_len, num, 0)
-        batch_annot = np.repeat(annotation, num, batch_dim)
-        state, dummy_context = model.generate(current_words, state,
-                                              batch_annot, batch_seq_len)
-
+        state = model.generate(current_words, state, context)
         beam_list.append(next_beam)
 
     if len(hypo_list) == 0:

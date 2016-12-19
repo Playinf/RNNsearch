@@ -668,7 +668,7 @@ def decode(args):
 
         model.option = option
 
-        tf.initialize_all_variables().run()
+        tf.global_variables_initializer().run()
         set_variables(tf.trainable_variables(), values)
 
         while True:
