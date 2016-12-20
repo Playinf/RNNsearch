@@ -369,7 +369,6 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
         batch_mannot = np.repeat(mapped_states, num, batch_dim)
         alpha, context = model.align(state, batch_annot, batch_mannot,
                                      batch_seq_len)
-
         prob_dist = model.predict(last_words, state, context)
 
         # select nbest
@@ -406,15 +405,12 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
         state = model.generate(current_words, state, context)
         beam_list.append(next_beam)
 
-    if len(hypo_list) == 0:
-        score_list = [0.0]
-        hypo_list = [["<s>"]]
-    else:
-        score_list = [item[1] for item in hypo_list]
-        hypo_list = [item[0] for item in hypo_list]
+    # postprocessing
+    score_list = [item[1] for item in hypo_list]
+    # remove BOS symbol
+    hypo_list = [item[0][1:] for item in hypo_list]
 
     for i, (trans, score) in enumerate(zip(hypo_list, score_list)):
-        # exclude "<s>"
         count = len(trans) - 1
         if count > 0:
             if normalize:
@@ -429,6 +425,6 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
 
     for trans, score in zip(hypo_list, score_list):
         trans = map(lambda x: vocab[x], trans)
-        output.append((trans[1:-1], score))
+        output.append((trans, score))
 
     return output

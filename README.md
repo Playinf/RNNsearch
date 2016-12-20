@@ -33,7 +33,7 @@ python scripts/shuffle.py --corpus zh.txt en.txt
       --attention 1000 --alpha 5e-4 --norm 1.0 --batch 128 --maxepoch 5
       --seed 1234 --freq 1000 --vfreq 1500 --dfreq 50 --sort 20
       --references nist02.ref0 nist02.ref1 nist02.ref2 nist02.ref3
-      --validatation nist02.src
+      --validation nist02.src
 ```
 ### Decoding
 ```

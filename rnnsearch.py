@@ -580,6 +580,7 @@ def train(args):
                         bleu_score = bleu(trans, references)
                         print "bleu: %2.4f" % bleu_score
                         if bleu_score > best_score:
+                            best_score = bleu_score
                             model.option["indices"] = reader.get_indices()
                             model.option["bleu"] = best_score
                             model.option["cost"] = totcost
@@ -613,7 +614,7 @@ def train(args):
                     model.option["count"] = [count, reader.count]
                     serialize(bestname, model)
 
-            print "averaged cost: ", totcost / option["count"]
+            print "averaged cost: ", totcost / option["count"][0]
             print "--------------------------------------------------"
 
             # early stopping
