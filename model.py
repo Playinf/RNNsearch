@@ -91,9 +91,7 @@ def attention(query, mapped_states, attn_size, attention_mask=None,
         batch = tf.shape(query)[0]
         hidden = tf.tanh(mapped_query + mapped_states)
         hidden = tf.reshape(hidden, [-1, attn_size])
-
-        with tf.variable_scope("attention"):
-            score = linear(hidden, 1, False, scope="attention_v")
+        score = linear(hidden, 1, False, scope="attention_v")
 
         exp_score = tf.exp(score)
         exp_score = tf.reshape(exp_score, [-1, batch])
@@ -102,7 +100,7 @@ def attention(query, mapped_states, attn_size, attention_mask=None,
             exp_score = exp_score * attention_mask
             alpha = exp_score / tf.reduce_sum(exp_score, 0)[None, :]
 
-        return alpha[:, :, None]
+    return alpha[:, :, None]
 
 
 def decoder(cell, inputs, initial_state, attention_states, attention_length,
