@@ -108,8 +108,9 @@ def serialize(name, model):
     pval = {}
 
     for param in params:
-        name_list.append(param.name)
-        pval[param.name] = param.eval(session)
+        pname = param.name.split(":")[0]
+        name_list.append(pname)
+        pval[pname] = param.eval(session)
 
     cPickle.dump(name_list, fd)
     np.savez(fd, **pval)

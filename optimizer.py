@@ -110,8 +110,12 @@ class optimizer:
         if "constraint" not in option:
             option["constraint"] = None
 
-        grads = tf.gradients(loss, params, colocate_gradients_with_ops=True,
-                             gate_gradients=True)
+        if "dtype" not in option:
+            dtype = tf.float32
+        else:
+            dtype = option["dtype"]
+
+        grads = tf.gradients(loss, params, colocate_gradients_with_ops=True)
 
         if option["norm"]:
             normval = tf.global_norm(grads)
@@ -147,14 +151,14 @@ class optimizer:
 
         if option["algorithm"] == "sgd":
             varlist = []
-            lr = tf.placeholder(tf.float32, [])
+            lr = tf.placeholder(dtype, [])
             defaults = [('alpha', 1.0)]
             placeholders.append(lr)
             var_updates = sgd_updates(gvars_and_vars, lr)
         elif option["algorithm"] == "rmsprop":
-            lr = tf.placeholder(tf.float32, [])
-            rho = tf.placeholder(tf.float32, [])
-            eps = tf.placeholder(tf.float32, [])
+            lr = tf.placeholder(dtype, [])
+            rho = tf.placeholder(dtype, [])
+            eps = tf.placeholder(dtype, [])
             varlist = []
             svars = []
 
@@ -171,12 +175,12 @@ class optimizer:
             var_updates = rmsprop_updates(gvars_and_vars, svars,
                                                   lr, rho, eps)
         elif option["algorithm"] == "adam":
-            lr = tf.placeholder(tf.float32, [])
-            beta1 = tf.placeholder(tf.float32, [])
-            beta2 = tf.placeholder(tf.float32, [])
-            eps = tf.placeholder(tf.float32, [])
+            lr = tf.placeholder(dtype, [])
+            beta1 = tf.placeholder(dtype, [])
+            beta2 = tf.placeholder(dtype, [])
+            eps = tf.placeholder(dtype, [])
 
-            t = tf.Variable(0.0, name="adam_t", dtype=tf.float32,
+            t = tf.Variable(0.0, name="adam_t", dtype=dtype,
                             trainable=False)
             varlist = [t]
             svars = [t]

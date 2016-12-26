@@ -8,14 +8,49 @@ import tensorflow as tf
 from utils import function
 from search import beam, select_nbest
 from tensorflow.python.ops.rnn import _rnn_step as rnn_step
-from tensorflow.python.ops.rnn_cell import _linear as linear
+
+
+def linear(inputs, output_size, bias, concat=False, dtype=None, scope=None):
+    if not isinstance(inputs, (list, tuple)):
+        inputs = [inputs]
+
+    input_size = [item.get_shape()[1].value for item in inputs]
+
+    if len(inputs) != len(input_size):
+        raise RuntimeError("unmatched elements found: inputs and input_size")
+
+    results = []
+
+    with tf.variable_scope(scope):
+        if concat:
+            input_size = sum(input_size)
+            inputs = tf.concat(1, inputs)
+
+            shape = [input_size, output_size]
+            matrix = tf.get_variable("matrix", shape, dtype=dtype)
+            results.append(tf.matmul(inputs, matrix))
+        else:
+            for i in range(len(input_size)):
+                shape = [input_size[i], output_size]
+                name = "matrix_%d" % i
+                matrix = tf.get_variable(name, shape, dtype=dtype)
+                results.append(tf.matmul(inputs[i], matrix))
+
+        if bias:
+            shape = [output_size]
+            bias = tf.get_variable("bias", shape, dtype=dtype)
+            results.append(bias)
+
+    if len(results) == 1:
+        return results[0]
+
+    return reduce(tf.add, results)
 
 
 def maxout(inputs, size, maxpart, use_bias=True, scope=None):
-    with tf.variable_scope(scope or "maxout"):
-        candidate = linear(inputs, size * maxpart, use_bias)
-        value = tf.reshape(candidate, [-1, size, maxpart])
-        output = tf.reduce_max(value, 2)
+    candidate = linear(inputs, size * maxpart, use_bias, scope="maxout")
+    value = tf.reshape(candidate, [-1, size, maxpart])
+    output = tf.reduce_max(value, 2)
 
     return output
 
@@ -33,13 +68,10 @@ class gru_cell(tf.nn.rnn_cell.RNNCell):
 
         with tf.variable_scope(scope or "gru_cell"):
             x = inputs + [state]
-            with tf.variable_scope("reset-gate"):
-                r = tf.sigmoid(linear(x, output_size, False))
-            with tf.variable_scope("update-gate"):
-                u = tf.sigmoid(linear(x, output_size, False))
-            with tf.variable_scope("candidate"):
-                x = inputs + [r * state]
-                c = tf.tanh(linear(x, output_size, True))
+            r = tf.sigmoid(linear(x, output_size, False, scope="reset_gate"))
+            u = tf.sigmoid(linear(x, output_size, False, scope="update_gate"))
+            x = inputs + [r * state]
+            c = tf.tanh(linear(x, output_size, True, scope="candidate"))
 
             new_state = u * state + (1 - u) * c
 
@@ -54,18 +86,74 @@ class gru_cell(tf.nn.rnn_cell.RNNCell):
         return self.size
 
 
+def gru_encoder(cell, inputs, initial_state, sequence_length, dtype=None):
+    if not isinstance(cell, gru_cell):
+        raise ValueError("only gru_cell are supported")
+
+    if inputs is None:
+        raise ValueError("inputs must not be None")
+
+    output_size = cell.output_size
+    dtype = dtype or inputs.dtype
+
+    time_steps = tf.shape(inputs)[0]
+    batch = tf.shape(inputs)[1]
+
+    zero_output = tf.zeros([batch, output_size], dtype)
+
+    if initial_state is None:
+        initial_state = cell.zero_state(batch, dtype)
+
+    input_ta = tf.TensorArray(dtype, time_steps,
+                              tensor_array_name="input_array")
+    output_ta = tf.TensorArray(dtype, time_steps,
+                               tensor_array_name="output_array")
+    input_ta = input_ta.unpack(inputs)
+
+    def loop(time, output_ta, state):
+        inputs = input_ta.read(time)
+        call_cell = lambda: cell(inputs, state)
+        output, new_state = rnn_step(time, sequence_length, None, None,
+                                     zero_output, state, call_cell, None,
+                                     True)
+        output_ta = output_ta.write(time, output)
+        return (time + 1, output_ta, new_state)
+
+    time = tf.constant(0, dtype=tf.int32, name="time")
+    cond = lambda time, *_: time < time_steps
+    loop_vars = (time, output_ta, initial_state)
+
+    outputs = tf.while_loop(cond, loop, loop_vars, parallel_iterations=32,
+                            swap_memory=True)
+
+    output_final_ta = outputs[1]
+    final_state = outputs[2]
+
+    all_output = output_final_ta.pack()
+    all_output.set_shape([None, None, output_size])
+
+    return (all_output, final_state)
+
+
 def encoder(cell, inputs, sequence_length, hidden_size, dtype=None,
             scope=None):
     dtype = None or inputs.dtype
 
     with tf.variable_scope(scope or "encoder"):
-        outputs = tf.nn.bidirectional_dynamic_rnn(cell, cell,
-                                                  inputs,
-                                                  sequence_length,
-                                                  time_major=True,
-                                                  swap_memory=True,
-                                                  dtype=dtype)
-    return outputs
+        with tf.variable_scope("forward"):
+            fd_states, fd_fstate = gru_encoder(cell, inputs, None,
+                                               sequence_length, dtype)
+        with tf.variable_scope("backward"):
+            inputs_reverse = tf.reverse_sequence(input=inputs,
+                                                 seq_lengths=sequence_length,
+                                                 seq_dim=0, batch_dim=1)
+            bd_states, bd_fstate = gru_encoder(cell, inputs_reverse, None,
+                                               sequence_length, dtype)
+            bd_states = tf.reverse_sequence(input=bd_states,
+                                            seq_lengths=sequence_length,
+                                            seq_dim=0, batch_dim=1)
+
+    return ((fd_states, bd_states), (fd_fstate, bd_fstate))
 
 
 # precompute mapped attention states to speed up decoding
@@ -98,7 +186,8 @@ def attention(query, mapped_states, attn_size, attention_mask=None,
 
         if attention_mask is not None:
             exp_score = exp_score * attention_mask
-            alpha = exp_score / tf.reduce_sum(exp_score, 0)[None, :]
+
+        alpha = exp_score / tf.reduce_sum(exp_score, 0)[None, :]
 
     return alpha[:, :, None]
 
@@ -133,17 +222,15 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
     with tf.variable_scope(scope or "decoder"):
         mapped_states = map_attention_states(attention_states, attn_size)
 
-        input_ta = tf.TensorArray(tf.float32, time_steps,
+        input_ta = tf.TensorArray(dtype, time_steps,
                                   tensor_array_name="input_array")
-        alpha_ta = tf.TensorArray(tf.float32, time_steps,
-                                  tensor_array_name="alpha_array")
-        output_ta = tf.TensorArray(tf.float32, time_steps,
+        output_ta = tf.TensorArray(dtype, time_steps,
                                    tensor_array_name="output_array")
-        context_ta = tf.TensorArray(tf.float32, time_steps,
+        context_ta = tf.TensorArray(dtype, time_steps,
                                     tensor_array_name="context_array")
         input_ta = input_ta.unpack(inputs)
 
-        def loop(time, alpha_ta, output_ta, context_ta, state):
+        def loop(time, output_ta, context_ta, state):
             alpha = attention(state, mapped_states, attn_size, attention_mask)
             context = tf.reduce_sum(alpha * attention_states, 0)
 
@@ -152,36 +239,33 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
             output, new_state = rnn_step(time, sequence_length, None, None,
                                          zero_output, state, call_cell, None,
                                          True)
-            alpha_ta = alpha_ta.write(time, alpha[:, :, 0])
             output_ta = output_ta.write(time, output)
             context_ta = context_ta.write(time, context)
-            return (time + 1, alpha_ta, output_ta, context_ta, new_state)
+            return (time + 1, output_ta, context_ta, new_state)
 
         time = tf.constant(0, dtype=tf.int32, name="time")
         cond = lambda time, *_: time < time_steps
-        loop_vars = (time, alpha_ta, output_ta, context_ta, initial_state)
+        loop_vars = (time, output_ta, context_ta, initial_state)
 
         outputs = tf.while_loop(cond, loop, loop_vars, parallel_iterations=32,
                                 swap_memory=True)
 
-        alpha_final_ta = outputs[1]
-        output_final_ta = outputs[2]
-        context_final_ta = outputs[3]
-        final_state = outputs[4]
+        output_final_ta = outputs[1]
+        context_final_ta = outputs[2]
+        final_state = outputs[3]
 
-        all_alpha = alpha_final_ta.pack()
         all_output = output_final_ta.pack()
         all_context = context_final_ta.pack()
 
         all_output.set_shape([None, None, output_size])
 
-        return (all_output, all_context, all_alpha, final_state)
+        return (all_output, all_context, final_state)
 
 
 class rnnsearch:
 
     def __init__(self, emb_size, hidden_size, attn_size,
-                 svocab_size, tvocab_size, scope=None):
+                 svocab_size, tvocab_size, dtype=tf.float32, scope=None):
         # training graph
         with tf.variable_scope(scope or "rnnsearch"):
             src_seq = tf.placeholder(tf.int32, [None, None], "soruce_sequence")
@@ -189,40 +273,49 @@ class rnnsearch:
             tgt_seq = tf.placeholder(tf.int32, [None, None], "target_sequence")
             tgt_len = tf.placeholder(tf.int32, [None], "target_length")
 
-            with tf.device("/cpu:0"):
-                source_embedding = tf.get_variable("source_embedding",
-                                                   [svocab_size, emb_size],
-                                                   tf.float32)
-                target_embedding = tf.get_variable("target_embedding",
-                                                   [tvocab_size, emb_size],
-                                                   tf.float32)
-                source_bias = tf.get_variable("source_embedding_bias",
-                                              [emb_size], tf.float32)
-                target_bias = tf.get_variable("target_embedding_bias",
-                                              [emb_size], tf.float32)
+            with tf.variable_scope("source_embedding"):
+                with tf.device("/cpu:0"):
+                    source_embedding = tf.get_variable("embedding",
+                                                       [svocab_size, emb_size],
+                                                       dtype)
+                    source_inputs = tf.gather(source_embedding, src_seq)
 
-            source_inputs = tf.gather(source_embedding, src_seq) + source_bias
-            target_inputs = tf.gather(target_embedding, tgt_seq) + target_bias
+                source_bias = tf.get_variable("bias", [emb_size], dtype)
+
+            with tf.variable_scope("target_embedding"):
+                with tf.device("/cpu:0"):
+                    target_embedding = tf.get_variable("embedding",
+                                                       [tvocab_size, emb_size],
+                                                       dtype)
+                    target_inputs = tf.gather(target_embedding, tgt_seq)
+
+                target_bias = tf.get_variable("bias", [emb_size], dtype)
+
+
+            source_inputs = source_inputs + source_bias
+            target_inputs = target_inputs + target_bias
 
             # run encoder
             cell = gru_cell(hidden_size)
-            outputs = encoder(cell, source_inputs, src_len, hidden_size)
+            outputs = encoder(cell, source_inputs, src_len, hidden_size, dtype)
             encoder_outputs, encoder_output_states = outputs
 
             # compute initial state for decoder
             annotation = tf.concat(2, encoder_outputs)
             final_state = encoder_output_states[-1]
-            initial_state = tf.tanh(linear(final_state, hidden_size, True,
-                                           scope="initial"))
+
+            with tf.variable_scope("decoder"):
+                initial_state = tf.tanh(linear(final_state, hidden_size, True,
+                                               scope="initial"))
 
             # run decoder
             decoder_outputs = decoder(cell, target_inputs, initial_state,
                                       annotation, src_len, tgt_len, attn_size)
-            all_output, all_context, all_alpha, final_state = decoder_outputs
+            all_output, all_context, final_state = decoder_outputs
 
             # compute costs
             batch = tf.shape(tgt_seq)[1]
-            zero_embedding = tf.zeros([1, batch, emb_size])
+            zero_embedding = tf.zeros([1, batch, emb_size], dtype=dtype)
             shift_inputs = tf.concat(0, [zero_embedding, target_inputs])
             shift_inputs = shift_inputs[:-1, :, :]
 
@@ -234,19 +327,20 @@ class rnnsearch:
             prev_states = tf.reshape(prev_states, [-1, hidden_size])
             all_context = tf.reshape(all_context, [-1, 2 * hidden_size])
 
-            features = [prev_states, shift_inputs, all_context]
-            hidden = maxout(features, hidden_size / 2, 2, True)
-            readout = linear(hidden, emb_size, False,  scope="deepout")
-            logits = linear(readout, tvocab_size, True, scope="prediction")
+            with tf.variable_scope("decoder"):
+                features = [prev_states, shift_inputs, all_context]
+                hidden = maxout(features, hidden_size / 2, 2, True)
+                readout = linear(hidden, emb_size, False,  scope="deepout")
+                logits = linear(readout, tvocab_size, True, scope="logits")
 
-            labels = tf.reshape(tgt_seq, [-1])
-            crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(logits,
+                labels = tf.reshape(tgt_seq, [-1])
+                crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(logits,
                                                                       labels)
-            crossent = tf.reshape(crossent, tf.shape(tgt_seq))
-            mask = tf.sequence_mask(tgt_len, dtype=tf.float32)
+                crossent = tf.reshape(crossent, tf.shape(tgt_seq))
+                mask = tf.sequence_mask(tgt_len, dtype=dtype)
 
-            mask = tf.transpose(mask)
-            cost = tf.reduce_mean(tf.reduce_sum(crossent * mask, 0))
+                mask = tf.transpose(mask)
+                cost = tf.reduce_mean(tf.reduce_sum(crossent * mask, 0))
 
         training_inputs = [src_seq, src_len, tgt_seq, tgt_len]
         training_outputs = [cost]
@@ -261,22 +355,20 @@ class rnnsearch:
         with tf.variable_scope(scope or "rnnsearch", reuse=True):
             prev_words = tf.placeholder(tf.int32, [None], "prev_token")
 
-            with tf.device("/cpu:0"):
-                target_embedding = tf.get_variable("target_embedding",
-                                                   [tvocab_size, emb_size],
-                                                   tf.float32)
-                target_bias = tf.get_variable("target_embedding_bias",
-                                              [emb_size], tf.float32)
-
-            target_inputs = tf.gather(target_embedding, prev_words)
-            target_inputs = target_inputs + target_bias
+            with tf.variable_scope("target_embedding"):
+                with tf.device("/cpu:0"):
+                    target_embedding = tf.get_variable("embedding",
+                                                       [tvocab_size, emb_size],
+                                                       dtype)
+                    target_inputs = tf.gather(target_embedding, prev_words)
+                target_bias = tf.get_variable("bias", [emb_size], dtype)
 
             # zeros out embedding if y is 0
             cond = tf.equal(prev_words, 0)
-            cond = tf.cast(cond, tf.float32)
+            cond = tf.cast(cond, dtype)
             target_inputs = target_inputs * (1.0 - tf.expand_dims(cond, 1))
 
-            attention_mask = tf.sequence_mask(src_len, dtype=tf.float32)
+            attention_mask = tf.sequence_mask(src_len, dtype=dtype)
             attention_mask = tf.transpose(attention_mask)
 
             with tf.variable_scope("decoder"):
@@ -287,11 +379,11 @@ class rnnsearch:
                 output, next_state = cell([target_inputs, context],
                                           initial_state)
 
-            features = [initial_state, target_inputs, context]
-            hidden = maxout(features, hidden_size / 2, 2, True)
-            readout = linear(hidden, emb_size, False,  scope="deepout")
-            logits = linear(readout, tvocab_size, True, scope="prediction")
-            probs = tf.nn.softmax(logits)
+                features = [initial_state, target_inputs, context]
+                hidden = maxout(features, hidden_size / 2, 2, True)
+                readout = linear(hidden, emb_size, False,  scope="deepout")
+                logits = linear(readout, tvocab_size, True, scope="logits")
+                probs = tf.nn.softmax(logits)
 
         precomputation_inputs = [annotation]
         precomputation_outputs = [mapped_states]
@@ -321,8 +413,8 @@ class rnnsearch:
         self.parameter = tf.trainable_variables()
 
 
-def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
-               minlen=None):
+def beamsearch(model, seq, beamsize=10, normalize=False,
+               maxlen=None, minlen=None):
     size = beamsize
 
     vocabulary = model.option["vocabulary"]
@@ -345,17 +437,16 @@ def beamsearch(model, seq, beamsize=10, normalize=False, maxlen=None,
 
     initial_beam = beam(size)
     # </s>
-    initial_beam.candidate = [[0]]
+    initial_beam.candidate = [[eosid]]
     initial_beam.score = np.zeros([1], "float32")
 
     hypo_list = []
     beam_list = [initial_beam]
-    cond = lambda x: x[-1] == eosid
+    cond = lambda hypo: hypo[-1] == eosid
 
     state = initial_state
 
     for k in range(maxlen):
-        # get previous results
         prev_beam = beam_list[-1]
         candidate = prev_beam.candidate
         num = len(candidate)

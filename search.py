@@ -30,6 +30,18 @@ def find_nbest(score, n, threshold=None):
     return nbest_score, beam_indices, var_indices
 
 
+# select value when corresponding condition is True
+def select(value, condition):
+    selected = []
+
+    for cond in condition:
+        if not cond:
+            continue
+        selected.append()
+
+    return selected
+
+
 # nested: a nested structure of shape batch * dim
 # indices: indices to select
 def select_nbest(nested, indices):
