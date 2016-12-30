@@ -73,7 +73,7 @@ class gru_cell(tf.nn.rnn_cell.RNNCell):
             x = inputs + [r * state]
             c = tf.tanh(linear(x, output_size, True, scope="candidate"))
 
-            new_state = u * state + (1 - u) * c
+            new_state = (1.0 - u) * state + u * c
 
         return new_state, new_state
 
@@ -135,8 +135,7 @@ def gru_encoder(cell, inputs, initial_state, sequence_length, dtype=None):
     return (all_output, final_state)
 
 
-def encoder(cell, inputs, sequence_length, hidden_size, dtype=None,
-            scope=None):
+def encoder(cell, inputs, sequence_length, dtype=None, scope=None):
     dtype = None or inputs.dtype
 
     with tf.variable_scope(scope or "encoder"):
@@ -264,10 +263,38 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
 
 class rnnsearch:
 
-    def __init__(self, emb_size, hidden_size, attn_size,
-                 svocab_size, tvocab_size, dtype=tf.float32, scope=None):
+    def __init__(self, **option):
+        # source and target embedding dim
+        sedim, tedim = option["embdim"]
+        # source, target and attention hidden dim
+        shdim, thdim, ahdim = option["hidden"]
+        # maxout hidden dim
+        maxdim = option["maxhid"]
+        # maxout part
+        maxpart = option["maxpart"]
+        # deepout hidden dim
+        deephid = option["deephid"]
+        svocab, tvocab = option["vocabulary"]
+        sw2id, sid2w = svocab
+        tw2id, tid2w = tvocab
+        # source and target vocabulary size
+        svsize, tvsize = len(sid2w), len(tid2w)
+
+        if "scope" not in option or option["scope"] is None:
+            option["scope"] = "rnnsearch"
+
+        if "initializer" not in option:
+            option["initializer"] = None
+
+        if "regularizer" not in option:
+            option["regularizer"] = None
+
+        dtype = tf.float32
+        scope = option["scope"]
+        initializer = option["initializer"]
+
         # training graph
-        with tf.variable_scope(scope or "rnnsearch"):
+        with tf.variable_scope(scope, initializer=initializer, dtype=dtype):
             src_seq = tf.placeholder(tf.int32, [None, None], "soruce_sequence")
             src_len = tf.placeholder(tf.int32, [None], "source_length")
             tgt_seq = tf.placeholder(tf.int32, [None, None], "target_sequence")
@@ -276,28 +303,25 @@ class rnnsearch:
             with tf.variable_scope("source_embedding"):
                 with tf.device("/cpu:0"):
                     source_embedding = tf.get_variable("embedding",
-                                                       [svocab_size, emb_size],
-                                                       dtype)
+                                                       [svsize, sedim], dtype)
                     source_inputs = tf.gather(source_embedding, src_seq)
 
-                source_bias = tf.get_variable("bias", [emb_size], dtype)
+                source_bias = tf.get_variable("bias", [sedim], dtype)
 
             with tf.variable_scope("target_embedding"):
                 with tf.device("/cpu:0"):
                     target_embedding = tf.get_variable("embedding",
-                                                       [tvocab_size, emb_size],
-                                                       dtype)
+                                                       [tvsize, tedim], dtype)
                     target_inputs = tf.gather(target_embedding, tgt_seq)
 
-                target_bias = tf.get_variable("bias", [emb_size], dtype)
-
+                target_bias = tf.get_variable("bias", [tedim], dtype)
 
             source_inputs = source_inputs + source_bias
             target_inputs = target_inputs + target_bias
 
             # run encoder
-            cell = gru_cell(hidden_size)
-            outputs = encoder(cell, source_inputs, src_len, hidden_size, dtype)
+            cell = gru_cell(shdim)
+            outputs = encoder(cell, source_inputs, src_len, dtype)
             encoder_outputs, encoder_output_states = outputs
 
             # compute initial state for decoder
@@ -305,17 +329,17 @@ class rnnsearch:
             final_state = encoder_output_states[-1]
 
             with tf.variable_scope("decoder"):
-                initial_state = tf.tanh(linear(final_state, hidden_size, True,
+                initial_state = tf.tanh(linear(final_state, thdim, True,
                                                scope="initial"))
 
             # run decoder
             decoder_outputs = decoder(cell, target_inputs, initial_state,
-                                      annotation, src_len, tgt_len, attn_size)
+                                      annotation, src_len, tgt_len, ahdim)
             all_output, all_context, final_state = decoder_outputs
 
             # compute costs
             batch = tf.shape(tgt_seq)[1]
-            zero_embedding = tf.zeros([1, batch, emb_size], dtype=dtype)
+            zero_embedding = tf.zeros([1, batch, tedim], dtype=dtype)
             shift_inputs = tf.concat(0, [zero_embedding, target_inputs])
             shift_inputs = shift_inputs[:-1, :, :]
 
@@ -323,15 +347,15 @@ class rnnsearch:
                                        all_output])
             prev_states = all_states[:-1]
 
-            shift_inputs = tf.reshape(shift_inputs, [-1, emb_size])
-            prev_states = tf.reshape(prev_states, [-1, hidden_size])
-            all_context = tf.reshape(all_context, [-1, 2 * hidden_size])
+            shift_inputs = tf.reshape(shift_inputs, [-1, tedim])
+            prev_states = tf.reshape(prev_states, [-1, thdim])
+            all_context = tf.reshape(all_context, [-1, 2 * shdim])
 
             with tf.variable_scope("decoder"):
                 features = [prev_states, shift_inputs, all_context]
-                hidden = maxout(features, hidden_size / 2, 2, True)
-                readout = linear(hidden, emb_size, False,  scope="deepout")
-                logits = linear(readout, tvocab_size, True, scope="logits")
+                hidden = maxout(features, maxdim, maxpart, True)
+                readout = linear(hidden, deephid, False,  scope="deepout")
+                logits = linear(readout, tvsize, True, scope="logits")
 
                 labels = tf.reshape(tgt_seq, [-1])
                 crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(logits,
@@ -358,10 +382,9 @@ class rnnsearch:
             with tf.variable_scope("target_embedding"):
                 with tf.device("/cpu:0"):
                     target_embedding = tf.get_variable("embedding",
-                                                       [tvocab_size, emb_size],
-                                                       dtype)
+                                                       [tvsize, tedim], dtype)
                     target_inputs = tf.gather(target_embedding, prev_words)
-                target_bias = tf.get_variable("bias", [emb_size], dtype)
+                target_bias = tf.get_variable("bias", [tedim], dtype)
 
             # zeros out embedding if y is 0
             cond = tf.equal(prev_words, 0)
@@ -372,17 +395,17 @@ class rnnsearch:
             attention_mask = tf.transpose(attention_mask)
 
             with tf.variable_scope("decoder"):
-                mapped_states = map_attention_states(annotation, attn_size)
-                alpha = attention(initial_state, mapped_states, attn_size,
+                mapped_states = map_attention_states(annotation, ahdim)
+                alpha = attention(initial_state, mapped_states, ahdim,
                                   attention_mask)
                 context = tf.reduce_sum(alpha * annotation, 0)
                 output, next_state = cell([target_inputs, context],
                                           initial_state)
 
                 features = [initial_state, target_inputs, context]
-                hidden = maxout(features, hidden_size / 2, 2, True)
-                readout = linear(hidden, emb_size, False,  scope="deepout")
-                logits = linear(readout, tvocab_size, True, scope="logits")
+                hidden = maxout(features, maxdim, maxpart, True)
+                readout = linear(hidden, deephid, False,  scope="deepout")
+                logits = linear(readout, tvsize, True, scope="logits")
                 probs = tf.nn.softmax(logits)
 
         precomputation_inputs = [annotation]
@@ -410,10 +433,10 @@ class rnnsearch:
         self.generate = generate
         self.evaluate = evaluate
         self.precompute = precompute
-        self.parameter = tf.trainable_variables()
+        self.option = option
 
 
-def beamsearch(model, seq, beamsize=10, normalize=False,
+def beamsearch(model, seq, length=None, beamsize=10, normalize=False,
                maxlen=None, minlen=None):
     size = beamsize
 
@@ -431,7 +454,11 @@ def beamsearch(model, seq, beamsize=10, normalize=False,
     if minlen == None:
         minlen = seq.shape[time_dim] / 2
 
-    seq_len = np.array([seq.shape[time_dim]])
+    if length is None:
+        seq_len = np.array([seq.shape[time_dim]])
+    else:
+        seq_len = length
+
     annotation, initial_state = model.encode(seq, seq_len)
     mapped_states = model.precompute(annotation)
 

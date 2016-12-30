@@ -100,7 +100,6 @@ class optimizer:
 
     def __init__(self, model, **option):
         loss = model.cost
-        params = model.parameter
         inputs = model.inputs
         outputs = model.outputs
 
@@ -114,6 +113,11 @@ class optimizer:
             dtype = tf.float32
         else:
             dtype = option["dtype"]
+
+        if "variables" not in option or not option["variables"]:
+            params = tf.trainable_variables()
+        else:
+            params = option["variables"]
 
         grads = tf.gradients(loss, params, colocate_gradients_with_ops=True)
 

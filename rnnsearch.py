@@ -53,14 +53,14 @@ def convert_data(data, voc, unk="UNK", eos="<eos>", time_major=True):
     return batch_data, data_length
 
 
-def loadvocab(file):
+def load_vocab(file):
     fd = open(file, "r")
     vocab = cPickle.load(fd)
     fd.close()
     return vocab
 
 
-def invertvoc(vocab):
+def invert_vocab(vocab):
     v = {}
     for k, idx in vocab.iteritems():
         v[idx] = k
@@ -68,11 +68,103 @@ def invertvoc(vocab):
     return v
 
 
-def set_variables(var_list, value_list):
-    session = tf.get_default_session()
+def count_parameters(variables):
+    n = 0
 
-    for var, val in zip(var_list, value_list):
-        session.run(var.assign(val))
+    for item in variables:
+        size = np.prod(item.get_shape().as_list())
+        n += size
+
+    return n
+
+
+def serialize(name, option):
+    fd = open(name, "w")
+    params = tf.trainable_variables()
+    names = [p.name.split(":")[0] for p in params]
+    vals = dict([(p.name.split(":")[0], p.get_value()) for p in params])
+
+    if option["indices"] != None:
+        indices = option["indices"]
+        vals["indices"] = indices
+        option["indices"] = None
+    else:
+        indices = None
+
+    cPickle.dump(option, fd)
+    cPickle.dump(names, fd)
+    # compress
+    np.savez(fd, **vals)
+
+    # restore
+    if indices is not None:
+        option["indices"] = indices
+
+    fd.close()
+
+
+# load model from file
+def load_model(name):
+    fd = open(name, "r")
+    option = cPickle.load(fd)
+    names = cPickle.load(fd)
+    vals = dict(np.load(fd))
+
+    params = [(n, vals[n]) for n in names]
+
+    if "indices" in vals:
+        option["indices"] = vals["indices"]
+
+    return option, params
+
+
+def match_variables(variables, values, ignore_prefix=True):
+    var_dict = {}
+    val_dict = {}
+    matched = []
+    not_matched = []
+
+    for var in variables:
+        name = var.name.split(":")[0]
+
+        if ignore_prefix:
+            name = "/".join(var.name.split("/")[1:])
+
+        var_dict[name] = var
+
+    for (name, val) in values:
+        if ignore_prefix:
+            name = "/".join(name.split("/")[1:])
+
+        val_dict[name] = val
+
+    # matching
+    for name in var_dict:
+        var = var_dict[name]
+
+        if name in val_dict:
+            val = val_dict[name]
+            matched.append([var, val])
+        else:
+            not_matched.append(var)
+
+    return matched, not_matched
+
+
+def restore_variables(matched, not_matched):
+    for var, val in matched:
+        var.set_value(val)
+
+    for var in not_matched:
+        sys.stderr.write("%s NOT restored\n" % var.name)
+
+
+def set_variables(variables, values):
+    session = tf.get_default_session()
+    values = [item[1] for item in values]
+
+    for p, v in zip(variables, values):
+        session.run(p.assign(v))
 
 
 def uniform(params, lower, upper, dtype="float32"):
@@ -86,50 +178,7 @@ def uniform(params, lower, upper, dtype="float32"):
     set_variables(params, val_list)
 
 
-def parameters(params):
-    n = 0
-
-    for var in params:
-        size = np.prod(var.get_shape().as_list())
-        n += size
-
-    return n
-
-
-def serialize(name, model):
-    fd = open(name, "w")
-    option = model.option
-    cPickle.dump(option, fd)
-
-    session = tf.get_default_session()
-    params = tf.trainable_variables()
-
-    name_list = []
-    pval = {}
-
-    for param in params:
-        pname = param.name.split(":")[0]
-        name_list.append(pname)
-        pval[pname] = param.eval(session)
-
-    cPickle.dump(name_list, fd)
-    np.savez(fd, **pval)
-    fd.close()
-
-
-def loadmodel(name):
-    fd = open(name, "r")
-    option = cPickle.load(fd)
-    name_list = cPickle.load(fd)
-
-    params = np.load(fd)
-    params = dict(params)
-    params = [params[nstr] for nstr in name_list]
-
-    return option, params
-
-
-def loadreferences(names, case=True):
+def load_references(names, case=True):
     references = []
     reader = textreader(names)
     stream = textiterator(reader, size=[1, 1])
@@ -180,27 +229,36 @@ def parseargs_train(args):
     usage = "rnnsearch.py train [<args>] [-h | --help]"
     parser = argparse.ArgumentParser(description=msg, usage=usage)
 
+    # corpus and vocabulary
     msg = "source and target corpus"
     parser.add_argument("--corpus", nargs=2, help=msg)
     msg = "source and target vocabulary"
     parser.add_argument("--vocab", nargs=2, help=msg)
-    msg = "model name to save or saved model to initalize, required"
+    msg = "model name to save or saved model to initialize, required"
     parser.add_argument("--model", required=True, help=msg)
 
+    # model parameters
     msg = "source and target embedding size, default 620"
-    parser.add_argument("--embdim", type=int, help=msg)
+    parser.add_argument("--embdim", nargs=2, type=int, help=msg)
     msg = "source, target and alignment hidden size, default 1000"
-    parser.add_argument("--hidden", type=int, help=msg)
-    msg = "attention hidden dimension, default 1000"
-    parser.add_argument("--attention", type=int, help=msg)
-
+    parser.add_argument("--hidden", nargs=3, type=int, help=msg)
+    msg = "maxout hidden dimension, default 500"
+    parser.add_argument("--maxhid", type=int, help=msg)
+    msg = "maxout number, default 2"
+    parser.add_argument("--maxpart", type=int, help=msg)
+    msg = "deepout hidden dimension, default 620"
+    parser.add_argument("--deephid", type=int, help=msg)
     msg = "maximum training epoch, default 5"
     parser.add_argument("--maxepoch", type=int, help=msg)
+
+    # tuning options
     msg = "learning rate, default 5e-4"
     parser.add_argument("--alpha", type=float, help=msg)
+    msg = "momentum, default 0.0"
+    parser.add_argument("--momentum", type=float, help=msg)
     msg = "batch size, default 128"
     parser.add_argument("--batch", type=int, help=msg)
-    msg = "optimizer, default adam"
+    msg = "optimizer, default rmsprop"
     parser.add_argument("--optimizer", type=str, help=msg)
     msg = "gradient clipping, default 1.0"
     parser.add_argument("--norm", type=float, help=msg)
@@ -208,11 +266,14 @@ def parseargs_train(args):
     parser.add_argument("--stop", type=int, help=msg)
     msg = "decay factor, default 0.5"
     parser.add_argument("--decay", type=float, help=msg)
+    msg = "L1 regularizer scale"
+    parser.add_argument("--l1-scale", type=float, help=msg)
+    msg = "L2 regularizer scale"
+    parser.add_argument("--l2-scale", type=float, help=msg)
+
+    # validation
     msg = "random seed, default 1234"
     parser.add_argument("--seed", type=int, help=msg)
-    msg = "initialzing scale"
-    parser.add_argument("--scale", type=float, help=msg)
-
     msg = "validation dataset"
     parser.add_argument("--validation", type=str, help=msg)
     msg = "reference data"
@@ -226,44 +287,49 @@ def parseargs_train(args):
     msg = "source and target sentence limit, default 50 (both), 0 to disable"
     parser.add_argument("--limit", type=int, nargs='+', help=msg)
 
-    # save frequency
+
+    # control frequency
     msg = "save frequency, default 1000"
     parser.add_argument("--freq", type=int, help=msg)
-    msg = "display frequency, default 50"
-    parser.add_argument("--dfreq", type=int, help=msg)
+    msg = "sample frequency, default 50"
+    parser.add_argument("--sfreq", type=int, help=msg)
     msg = "validation frequency, default 1000"
     parser.add_argument("--vfreq", type=int, help=msg)
 
     # control beamsearch
     msg = "beam size, default 10"
     parser.add_argument("--beamsize", type=int, help=msg)
-    msg = "normalize probability by the length of cadidate sentences"
+    msg = "normalize probability by the length of candidate sentences"
     parser.add_argument("--normalize", type=int, help=msg)
     msg = "max translation length"
     parser.add_argument("--maxlen", type=int, help=msg)
     msg = "min translation length"
     parser.add_argument("--minlen", type=int, help=msg)
 
+    msg = "initialize from another model"
+    parser.add_argument("--initialize", type=str, help=msg)
+    msg = "fine tune model"
+    parser.add_argument("--finetune", type=int, help=msg)
+    msg = "reset count"
+    parser.add_argument("--reset", type=int, help=msg)
+
     # running device
     msg = "gpu id, -1 to use cpu"
     parser.add_argument("--gpuid", type=int, default=0, help=msg)
-
-    msg = "reset"
-    parser.add_argument("--reset", type=int, default=0, help=msg)
 
     return parser.parse_args(args)
 
 
 def parseargs_decode(args):
-    msg = "translate using exsiting model"
+    msg = "translate using exsiting nmt model"
     usage = "rnnsearch.py translate [<args>] [-h | --help]"
     parser = argparse.ArgumentParser(description=msg, usage=usage)
 
     msg = "trained model"
-    parser.add_argument("--model", required=True, help=msg)
+    parser.add_argument("--model", type=str, required=True, help=msg)
     msg = "beam size"
     parser.add_argument("--beamsize", default=10, type=int, help=msg)
-    msg = "normalize probability by the length of cadidate sentences"
+    msg = "normalize probability by the length of candidate sentences"
     parser.add_argument("--normalize", action="store_true", help=msg)
     msg = "max translation length"
     parser.add_argument("--maxlen", type=int, help=msg)
@@ -286,21 +352,25 @@ def default_option():
     option["vocab"] = None
 
     # model parameters
-    option["embdim"] = 620
-    option["hidden"] = 1000
-    option["attention"] = 1000
+    option["embdim"] = [620, 620]
+    option["hidden"] = [1000, 1000, 1000]
+    option["maxpart"] = 2
+    option["maxhid"] = 500
+    option["deephid"] = 620
 
     # tuning options
     option["alpha"] = 5e-4
     option["batch"] = 128
-    option["optimizer"] = "adam"
-    option["norm"] = 5.0
+    option["momentum"] = 0.0
+    option["optimizer"] = "rmsprop"
+    option["variant"] = None
+    option["norm"] = 1.0
     option["stop"] = 0
     option["decay"] = 0.5
-    option["scale"] = 0.08
 
     # runtime information
     option["cost"] = 0.0
+    # batch/reader count
     option["count"] = [0, 0]
     option["epoch"] = 0
     option["maxepoch"] = 5
@@ -309,7 +379,7 @@ def default_option():
     option["limit"] = [50, 50]
     option["freq"] = 1000
     option["vfreq"] = 1000
-    option["dfreq"] = 50
+    option["sfreq"] = 50
     option["seed"] = 1234
     option["validation"] = None
     option["references"] = None
@@ -324,7 +394,7 @@ def default_option():
 
     # special symbols
     option["unk"] = "UNK"
-    option["eos"] = "</s>"
+    option["eos"] = "<eos>"
 
     return option
 
@@ -333,73 +403,85 @@ def args_to_dict(args):
     return args.__dict__
 
 
-def override_if_not_none(option, newopt, key):
-    if key not in newopt or key not in option:
-        return
-    if newopt[key]:
-        option[key] = newopt[key]
+def override_if_not_none(option, args, key):
+    value = args.__dict__[key]
+    option[key] = value if value != None else option[key]
 
 
 # override default options
 def override(option, newopt):
 
     # training corpus
-    if newopt["corpus"] == None and option["corpus"] == None:
-        raise RuntimeError("error: no training corpus specified")
+    if args.corpus == None and option["corpus"] == None:
+        raise ValueError("error: no training corpus specified")
 
     # vocabulary
-    if newopt["vocab"] == None and option["vocab"] == None:
-        raise RuntimeError("error: no training vocabulary specified")
+    if args.vocab == None and option["vocab"] == None:
+        raise ValueError("error: no training vocabulary specified")
 
-    override_if_not_none(option, newopt, "corpus")
+    if args.limit and len(args.limit) > 2:
+        raise ValueError("error: invalid number of --limit argument (<=2)")
+
+    if args.limit and len(args.limit) == 1:
+        args.limit = args.limit * 2
+
+    override_if_not_none(option, args, "corpus")
 
     # vocabulary and model paramters cannot be overrided
     if option["vocab"] == None:
-        option["vocab"] = newopt["vocab"]
+        option["vocab"] = args.vocab
+        svocab = load_vocab(args.vocab[0])
+        tvocab = load_vocab(args.vocab[1])
+        isvocab = invert_vocab(svocab)
+        itvocab = invert_vocab(tvocab)
 
-        svocab = loadvocab(args.vocab[0])
-        tvocab = loadvocab(args.vocab[1])
-        isvocab = invertvoc(svocab)
-        itvocab = invertvoc(tvocab)
-
-        # compatible with groundhog
+        # append a new symbol "<eos>" to vocabulary, it is not necessary
+        # because we can reuse "</s>" symbol in vocabulary
+        # but here we retain compatibility with GroundHog
         svocab[option["eos"]] = len(isvocab)
         tvocab[option["eos"]] = len(itvocab)
         isvocab[len(isvocab)] = option["eos"]
         itvocab[len(itvocab)] = option["eos"]
 
+        # <s> and </s> have the same id 0, used for decoding (target side)
+        option["bosid"] = 0
+        option["eosid"] = len(itvocab) - 1
+
         option["vocabulary"] = [[svocab, isvocab], [tvocab, itvocab]]
 
         # model parameters
-        override_if_not_none(option, newopt, "embdim")
-        override_if_not_none(option, newopt, "hidden")
-        override_if_not_none(option, newopt, "attention")
+        override_if_not_none(option, args, "embdim")
+        override_if_not_none(option, args, "hidden")
+        override_if_not_none(option, args, "maxhid")
+        override_if_not_none(option, args, "maxpart")
+        override_if_not_none(option, args, "deephid")
 
     # training options
-    override_if_not_none(option, newopt, "maxepoch")
-    override_if_not_none(option, newopt, "alpha")
-    override_if_not_none(option, newopt, "batch")
-    override_if_not_none(option, newopt, "optimizer")
-    override_if_not_none(option, newopt, "norm")
-    override_if_not_none(option, newopt, "stop")
-    override_if_not_none(option, newopt, "decay")
+    override_if_not_none(option, args, "maxepoch")
+    override_if_not_none(option, args, "alpha")
+    override_if_not_none(option, args, "momentum")
+    override_if_not_none(option, args, "batch")
+    override_if_not_none(option, args, "optimizer")
+    override_if_not_none(option, args, "norm")
+    override_if_not_none(option, args, "stop")
+    override_if_not_none(option, args, "decay")
 
     # runtime information
-    override_if_not_none(option, newopt, "validation")
-    override_if_not_none(option, newopt, "references")
-    override_if_not_none(option, newopt, "freq")
-    override_if_not_none(option, newopt, "vfreq")
-    override_if_not_none(option, newopt, "dfreq")
-    override_if_not_none(option, newopt, "seed")
-    override_if_not_none(option, newopt, "sort")
-    override_if_not_none(option, newopt, "shuffle")
-    override_if_not_none(option, newopt, "limit")
+    override_if_not_none(option, args, "validation")
+    override_if_not_none(option, args, "references")
+    override_if_not_none(option, args, "freq")
+    override_if_not_none(option, args, "vfreq")
+    override_if_not_none(option, args, "sfreq")
+    override_if_not_none(option, args, "seed")
+    override_if_not_none(option, args, "sort")
+    override_if_not_none(option, args, "shuffle")
+    override_if_not_none(option, args, "limit")
 
     # beamsearch
-    override_if_not_none(option, newopt, "beamsize")
-    override_if_not_none(option, newopt, "normalize")
-    override_if_not_none(option, newopt, "maxlen")
-    override_if_not_none(option, newopt, "minlen")
+    override_if_not_none(option, args, "beamsize")
+    override_if_not_none(option, args, "normalize")
+    override_if_not_none(option, args, "maxlen")
+    override_if_not_none(option, args, "minlen")
 
 
 def print_option(option):
@@ -415,10 +497,13 @@ def print_option(option):
 
     print "embdim:", option["embdim"]
     print "hidden:", option["hidden"]
-    print "attention:", option["attention"]
+    print "maxhid:", option["maxhid"]
+    print "maxpart:", option["maxpart"]
+    print "deephid:", option["deephid"]
 
     print "maxepoch:", option["maxepoch"]
     print "alpha:", option["alpha"]
+    print "momentum:", option["momentum"]
     print "batch:", option["batch"]
     print "optimizer:", option["optimizer"]
     print "norm:", option["norm"]
@@ -429,7 +514,7 @@ def print_option(option):
     print "references:", option["references"]
     print "freq:", option["freq"]
     print "vfreq:", option["vfreq"]
-    print "dfreq:", option["dfreq"]
+    print "sfreq:", option["sfreq"]
     print "seed:", option["seed"]
     print "sort:", option["sort"]
     print "shuffle:", option["shuffle"]
@@ -445,12 +530,12 @@ def print_option(option):
     print "eos:", option["eos"]
 
 
-def skipstream(stream, count):
+def skip_stream(stream, count):
     for i in range(count):
         stream.next()
 
 
-def getfilename(name):
+def get_filename(name):
     s = name.split(".")
     return s[0]
 
@@ -458,30 +543,43 @@ def getfilename(name):
 def train(args):
     option = default_option()
 
-    # load saved models
+    # predefined model names
+    pathname, basename = os.path.split(args.model)
+    modelname = get_filename(basename)
+    autoname = os.path.join(pathname, modelname + ".autosave.pkl")
+    bestname = os.path.join(pathname, modelname + ".best.pkl")
+
+    # load models
     if os.path.exists(args.model):
-        option, values = loadmodel(args.model)
+        option, params = load_model(args.model)
         init = False
     else:
         init = True
 
-    override(option, args_to_dict(args))
+    if args.initialize:
+        params = load_model(args.initialize)
+        params = params[1]
+        init = False
+
+    override(option, args)
     print_option(option)
 
-    # prepare
-    pathname, basename = os.path.split(args.model)
-    modelname = getfilename(basename)
-    autoname = os.path.join(pathname, modelname + ".autosave.pkl")
-    bestname = os.path.join(pathname, modelname + ".best.pkl")
+    # load references
+    if option["references"]:
+        references = load_references(option["references"])
+    else:
+        references = None
+
+    # input corpus
     batch = option["batch"]
     sortk = option["sort"] or 1
     shuffle = option["seed"] if option["shuffle"] else None
     reader = textreader(option["corpus"], shuffle)
-    stream = textiterator(reader, [batch, batch * sortk],
-                          [data_length, data_length],
+    processor = [data_length, data_length]
+    stream = textiterator(reader, [batch, batch * sortk], processor,
                           option["limit"], option["sort"])
 
-    if shuffle and "indices" in option and option["indices"] is not None:
+    if shuffle and option["indices"] is not None:
         reader.set_indices(option["indices"])
 
     if args.reset:
@@ -489,32 +587,7 @@ def train(args):
         option["epoch"] = 0
         option["cost"] = 0.0
 
-    skipstream(reader, option["count"][1])
-    epoch = option["epoch"]
-    maxepoch = option["maxepoch"]
-
-    if option["references"]:
-        references = loadreferences(option["references"])
-    else:
-        references = None
-
-    alpha = option["alpha"]
-
-    # beamsearch option
-    bopt = {}
-    bopt["beamsize"] = option["beamsize"]
-    bopt["normalize"] = option["normalize"]
-    bopt["maxlen"] = option["maxlen"]
-    bopt["minlen"] = option["minlen"]
-
-    # misc
-    svocabs, tvocabs = option["vocabulary"]
-    svocab, isvocab = svocabs
-    tvocab, itvocab = tvocabs
-    unk = option["unk"]
-    eos = option["eos"]
-
-    best_score = option["bleu"]
+    skip_stream(reader, option["count"][1])
     epoch = option["epoch"]
     maxepoch = option["maxepoch"]
 
@@ -526,35 +599,57 @@ def train(args):
         config.gpu_options.visible_device_list = "%d" % args.gpuid
 
     with tf.Session(config=config):
-        model = rnnsearch(option["embdim"], option["hidden"],
-                          option["attention"], len(isvocab), len(itvocab))
-
-        model.option = option
-        print "parameters:", parameters(tf.trainable_variables())
-
         # set seed
         np.random.seed(option["seed"])
         tf.set_random_seed(option["seed"])
 
+        # create model
+        initializer = tf.random_uniform_initializer(-0.08, 0.08)
+        model = rnnsearch(initializer=initializer, **option)
+
+        print "parameters:", count_parameters(tf.trainable_variables())
+
+        variables = None
+
+        if not init:
+            matched, not_matched = match_variables(tf.trainable_variables(),
+                                                   params)
+            if args.finetune:
+                variables = not_matched
+
         # create optimizer
         optim = optimizer(model, algorithm=option["optimizer"],
-                          norm=option["norm"])
+                          norm=option["norm"], variables=variables)
 
         tf.global_variables_initializer().run()
 
-        if init:
-            uniform(tf.trainable_variables(), -0.08, 0.08)
-        else:
-            set_variables(tf.trainable_variables(), values)
+        if not init:
+            restore_variables(matched, not_matched)
 
-        best_score = option["bleu"]
+        # beamsearch option
+        search_opt = {}
+        search_opt["beamsize"] = option["beamsize"]
+        search_opt["normalize"] = option["normalize"]
+        search_opt["maxlen"] = option["maxlen"]
+        search_opt["minlen"] = option["minlen"]
+
+        # vocabulary and special symbol
+        svocabs, tvocabs = option["vocabulary"]
+        svocab, isvocab = svocabs
+        tvocab, itvocab = tvocabs
+        unk_sym = option["unk"]
+        eos_sym = option["eos"]
+
+        # summary
         count = option["count"][0]
         totcost = option["cost"]
+        best_score = option["bleu"]
+        alpha = option["alpha"]
 
         for i in range(epoch, maxepoch):
             for data in stream:
-                xdata, xlen = convert_data(data[0], svocab, unk, eos)
-                ydata, ylen = convert_data(data[1], tvocab, unk, eos)
+                xdata, xlen = convert_data(data[0], svocab, unk_sym, eos_sym)
+                ydata, ylen = convert_data(data[1], tvocab, unk_sym, eos_sym)
 
                 t1 = time.time()
                 cost, norm = optim.optimize(xdata, xlen, ydata, ylen)
@@ -577,7 +672,8 @@ def train(args):
 
                 if count % option["vfreq"] == 0:
                     if option["validation"] and references:
-                        trans = translate(model, option["validation"], **bopt)
+                        trans = translate(model, option["validation"],
+                                          **search_opt)
                         bleu_score = bleu(trans, references)
                         print "bleu: %2.4f" % bleu_score
                         if bleu_score > best_score:
@@ -588,13 +684,14 @@ def train(args):
                             model.option["count"] = [count, reader.count]
                             serialize(bestname, model)
 
-                if count % option["dfreq"] == 0:
+                if count % option["sfreq"] == 0:
                     batch = len(data[0])
                     ind = np.random.randint(0, batch)
                     sdata = data[0][ind]
                     tdata = data[1][ind]
-                    xdata = xdata[:, ind:ind + 1]
-                    hls = beamsearch(model, xdata, **bopt)
+                    xdata = xdata[:, ind : ind + 1]
+                    xlen = xlen[:, ind : ind + 1]
+                    hls = beamsearch(model, xdata, xlen, **search_opt)
                     best, score = hls[0]
                     print sdata
                     print tdata
@@ -604,7 +701,7 @@ def train(args):
             print "--------------------------------------------------"
 
             if option["vfreq"] and references:
-                trans = translate(model, option["validation"], **bopt)
+                trans = translate(model, option["validation"], **search_opt)
                 bleu_score = bleu(trans, references)
                 print "iter: %d, bleu: %2.4f" % (i + 1, bleu_score)
                 if bleu_score > best_score:
@@ -641,7 +738,7 @@ def train(args):
 
 
 def decode(args):
-    option, values = loadmodel(args.model)
+    option, values = load_model(args.model)
 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
@@ -665,8 +762,7 @@ def decode(args):
     doption["normalize"] = args.normalize
 
     with tf.Session(config=config):
-        model = rnnsearch(option["embdim"], option["hidden"],
-                          option["attention"], len(isvocab), len(itvocab))
+        model = rnnsearch(**option)
 
         model.option = option
 
