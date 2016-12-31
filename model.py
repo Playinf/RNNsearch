@@ -162,7 +162,7 @@ def map_attention_states(attention_states, attn_size, scope=None):
         shape = tf.shape(attention_states)
         batched_states = tf.reshape(attention_states, [-1, hidden_size])
         mapped_states = linear(batched_states, attn_size, False,
-                               scope="annotation_w")
+                               scope="attention_w")
         mapped_states = tf.reshape(mapped_states,
                                    [shape[0], shape[1], attn_size])
 

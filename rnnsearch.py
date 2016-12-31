@@ -655,11 +655,11 @@ def train(args):
 
                 # save model
                 if count % option["freq"] == 0:
-                    model.option["indices"] = reader.get_indices()
-                    model.option["bleu"] = best_score
-                    model.option["cost"] = totcost
-                    model.option["count"] = [count, reader.count]
-                    serialize(autoname, model)
+                    option["indices"] = reader.get_indices()
+                    option["bleu"] = best_score
+                    option["cost"] = totcost
+                    option["count"] = [count, reader.count]
+                    serialize(autoname, option)
 
                 if count % option["vfreq"] == 0:
                     if option["validation"] and references:
@@ -669,11 +669,11 @@ def train(args):
                         print "bleu: %2.4f" % bleu_score
                         if bleu_score > best_score:
                             best_score = bleu_score
-                            model.option["indices"] = reader.get_indices()
-                            model.option["bleu"] = best_score
-                            model.option["cost"] = totcost
-                            model.option["count"] = [count, reader.count]
-                            serialize(bestname, model)
+                            option["indices"] = reader.get_indices()
+                            option["bleu"] = best_score
+                            option["cost"] = totcost
+                            option["count"] = [count, reader.count]
+                            serialize(bestname, option)
 
                 if count % option["sfreq"] == 0:
                     batch = len(data[0])
@@ -697,11 +697,11 @@ def train(args):
                 print "iter: %d, bleu: %2.4f" % (i + 1, bleu_score)
                 if bleu_score > best_score:
                     best_score = bleu_score
-                    model.option["indices"] = reader.get_indices()
-                    model.option["bleu"] = best_score
-                    model.option["cost"] = totcost
-                    model.option["count"] = [count, reader.count]
-                    serialize(bestname, model)
+                    option["indices"] = reader.get_indices()
+                    option["bleu"] = best_score
+                    option["cost"] = totcost
+                    option["count"] = [count, reader.count]
+                    serialize(bestname, option)
 
             print "averaged cost: ", totcost / option["count"][0]
             print "--------------------------------------------------"
@@ -715,13 +715,13 @@ def train(args):
             stream.reset()
 
             # update autosave
-            model.option["epoch"] = i + 1
-            model.option["alpha"] = alpha
-            model.option["indices"] = reader.get_indices()
-            model.option["bleu"] = best_score
-            model.option["cost"] = totcost
-            model.option["count"] = [0, 0]
-            serialize(autoname, model)
+            option["epoch"] = i + 1
+            option["alpha"] = alpha
+            option["indices"] = reader.get_indices()
+            option["bleu"] = best_score
+            option["cost"] = totcost
+            option["count"] = [0, 0]
+            serialize(autoname, option)
 
         print "best(bleu): %2.4f" % best_score
 
