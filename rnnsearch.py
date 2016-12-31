@@ -82,7 +82,8 @@ def serialize(name, option):
     fd = open(name, "w")
     params = tf.trainable_variables()
     names = [p.name.split(":")[0] for p in params]
-    vals = dict([(p.name.split(":")[0], p.get_value()) for p in params])
+    session = tf.get_default_session()
+    vals = dict([(p.name.split(":")[0], session.run(p)) for p in params])
 
     if option["indices"] != None:
         indices = option["indices"]
@@ -128,7 +129,7 @@ def match_variables(variables, values, ignore_prefix=True):
         name = var.name.split(":")[0]
 
         if ignore_prefix:
-            name = "/".join(var.name.split("/")[1:])
+            name = "/".join(name.split("/")[1:])
 
         var_dict[name] = var
 
@@ -152,8 +153,9 @@ def match_variables(variables, values, ignore_prefix=True):
 
 
 def restore_variables(matched, not_matched):
+    session = tf.get_default_session()
     for var, val in matched:
-        var.set_value(val)
+        session.run(var.assign(val))
 
     for var in not_matched:
         sys.stderr.write("%s NOT restored\n" % var.name)
@@ -165,17 +167,6 @@ def set_variables(variables, values):
 
     for p, v in zip(variables, values):
         session.run(p.assign(v))
-
-
-def uniform(params, lower, upper, dtype="float32"):
-    val_list = []
-
-    for var in params:
-        s = var.get_shape().as_list()
-        v = np.random.uniform(lower, upper, s).astype(dtype)
-        val_list.append(v)
-
-    set_variables(params, val_list)
 
 
 def load_references(names, case=True):
@@ -690,7 +681,7 @@ def train(args):
                     sdata = data[0][ind]
                     tdata = data[1][ind]
                     xdata = xdata[:, ind : ind + 1]
-                    xlen = xlen[:, ind : ind + 1]
+                    xlen = xlen[ind : ind + 1]
                     hls = beamsearch(model, xdata, xlen, **search_opt)
                     best, score = hls[0]
                     print sdata

@@ -301,21 +301,19 @@ class rnnsearch:
             tgt_len = tf.placeholder(tf.int32, [None], "target_length")
 
             with tf.variable_scope("source_embedding"):
-                with tf.device("/cpu:0"):
-                    source_embedding = tf.get_variable("embedding",
-                                                       [svsize, sedim], dtype)
-                    source_inputs = tf.gather(source_embedding, src_seq)
-
+                # place embedding and gather on CPU if you want to save memory
+                # a little bit slower
+                source_embedding = tf.get_variable("embedding",
+                                                   [svsize, sedim], dtype)
                 source_bias = tf.get_variable("bias", [sedim], dtype)
 
             with tf.variable_scope("target_embedding"):
-                with tf.device("/cpu:0"):
-                    target_embedding = tf.get_variable("embedding",
-                                                       [tvsize, tedim], dtype)
-                    target_inputs = tf.gather(target_embedding, tgt_seq)
-
+                target_embedding = tf.get_variable("embedding",
+                                                   [tvsize, tedim], dtype)
                 target_bias = tf.get_variable("bias", [tedim], dtype)
 
+            source_inputs = tf.gather(source_embedding, src_seq)
+            target_inputs = tf.gather(target_embedding, tgt_seq)
             source_inputs = source_inputs + source_bias
             target_inputs = target_inputs + target_bias
 
@@ -380,18 +378,20 @@ class rnnsearch:
             prev_words = tf.placeholder(tf.int32, [None], "prev_token")
 
             with tf.variable_scope("target_embedding"):
-                with tf.device("/cpu:0"):
-                    target_embedding = tf.get_variable("embedding",
-                                                       [tvsize, tedim], dtype)
-                    target_inputs = tf.gather(target_embedding, prev_words)
+                target_embedding = tf.get_variable("embedding",
+                                                   [tvsize, tedim], dtype)
                 target_bias = tf.get_variable("bias", [tedim], dtype)
+
+            target_inputs = tf.gather(target_embedding, prev_words)
+            target_inputs = target_inputs + target_bias
 
             # zeros out embedding if y is 0
             cond = tf.equal(prev_words, 0)
             cond = tf.cast(cond, dtype)
             target_inputs = target_inputs * (1.0 - tf.expand_dims(cond, 1))
 
-            attention_mask = tf.sequence_mask(src_len, dtype=dtype)
+            max_len = tf.shape(annotation)[0]
+            attention_mask = tf.sequence_mask(src_len, max_len, dtype=dtype)
             attention_mask = tf.transpose(attention_mask)
 
             with tf.variable_scope("decoder"):
@@ -440,10 +440,10 @@ def beamsearch(model, seq, length=None, beamsize=10, normalize=False,
                maxlen=None, minlen=None):
     size = beamsize
 
-    vocabulary = model.option["vocabulary"]
-    eos_symbol = model.option["eos"]
-    vocab = vocabulary[1][1]
-    eosid = vocabulary[1][0][eos_symbol]
+    # get vocabulary from the first model
+    vocab = model.option["vocabulary"][1][1]
+    eosid = model.option["eosid"]
+    bosid = model.option["bosid"]
 
     time_dim = 0
     batch_dim = 1
@@ -464,7 +464,7 @@ def beamsearch(model, seq, length=None, beamsize=10, normalize=False,
 
     initial_beam = beam(size)
     # </s>
-    initial_beam.candidate = [[eosid]]
+    initial_beam.candidate = [[bosid]]
     initial_beam.score = np.zeros([1], "float32")
 
     hypo_list = []
