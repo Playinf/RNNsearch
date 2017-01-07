@@ -116,6 +116,8 @@ def load_model(name):
     if "indices" in vals:
         option["indices"] = vals["indices"]
 
+    fd.close()
+
     return option, params
 
 
@@ -548,9 +550,11 @@ def train(args):
         init = True
 
     if args.initialize:
-        params = load_model(args.initialize)
-        params = params[1]
-        init = False
+        init_params = load_model(args.initialize)
+        init_params = init_params[1]
+        restore = True
+    else:
+        restore = False
 
     override(option, args)
     print_option(option)
@@ -602,19 +606,23 @@ def train(args):
 
         variables = None
 
-        if not init:
+        if restore:
             matched, not_matched = match_variables(tf.trainable_variables(),
-                                                   params)
+                                                   init_params)
             if args.finetune:
                 variables = not_matched
 
         # create optimizer
+        constraint = ["norm", option["norm"]]
         optim = optimizer(model, algorithm=option["optimizer"],
-                          norm=option["norm"], variables=variables)
+                          constraint=constraint, variables=variables)
 
         tf.global_variables_initializer().run()
 
         if not init:
+            set_variables(tf.trainable_variables(), params)
+
+        if restore:
             restore_variables(matched, not_matched)
 
         # beamsearch option
@@ -788,8 +796,8 @@ def decode(args):
 def helpinfo():
     print "usage:"
     print "\trnnsearch.py <command> [<args>]"
-    print "using rnnsearch.py train --help to see training options"
-    print "using rnnsearch.py translate --help to see translation options"
+    print "using 'rnnsearch.py train --help' to see training options"
+    print "using 'rnnsearch.py translate --help' to see decoding options"
 
 
 if __name__ == "__main__":
