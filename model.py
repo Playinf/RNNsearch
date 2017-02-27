@@ -8,6 +8,7 @@ import tensorflow as tf
 from utils import function
 from search import beam, select_nbest
 from tensorflow.python.ops.rnn import _rnn_step as rnn_step
+from tensorflow.python.ops.rnn_cell_impl import _RNNCell as RNNCell
 
 
 def linear(inputs, output_size, bias, concat=False, dtype=None, scope=None):
@@ -24,7 +25,7 @@ def linear(inputs, output_size, bias, concat=False, dtype=None, scope=None):
     with tf.variable_scope(scope):
         if concat:
             input_size = sum(input_size)
-            inputs = tf.concat(1, inputs)
+            inputs = tf.concat(inputs, 1)
 
             shape = [input_size, output_size]
             matrix = tf.get_variable("matrix", shape, dtype=dtype)
@@ -55,7 +56,7 @@ def maxout(inputs, size, maxpart, use_bias=True, scope=None):
     return output
 
 
-class gru_cell(tf.nn.rnn_cell.RNNCell):
+class gru_cell(RNNCell):
 
     def __init__(self, output_size):
         self.size = output_size
@@ -108,7 +109,7 @@ def gru_encoder(cell, inputs, initial_state, sequence_length, dtype=None):
                               tensor_array_name="input_array")
     output_ta = tf.TensorArray(dtype, time_steps,
                                tensor_array_name="output_array")
-    input_ta = input_ta.unpack(inputs)
+    input_ta = input_ta.unstack(inputs)
 
     def loop(time, output_ta, state):
         inputs = input_ta.read(time)
@@ -129,7 +130,7 @@ def gru_encoder(cell, inputs, initial_state, sequence_length, dtype=None):
     output_final_ta = outputs[1]
     final_state = outputs[2]
 
-    all_output = output_final_ta.pack()
+    all_output = output_final_ta.stack()
     all_output.set_shape([None, None, output_size])
 
     return (all_output, final_state)
@@ -227,7 +228,7 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
                                    tensor_array_name="output_array")
         context_ta = tf.TensorArray(dtype, time_steps,
                                     tensor_array_name="context_array")
-        input_ta = input_ta.unpack(inputs)
+        input_ta = input_ta.unstack(inputs)
 
         def loop(time, output_ta, context_ta, state):
             alpha = attention(state, mapped_states, attn_size, attention_mask)
@@ -253,8 +254,8 @@ def decoder(cell, inputs, initial_state, attention_states, attention_length,
         context_final_ta = outputs[2]
         final_state = outputs[3]
 
-        all_output = output_final_ta.pack()
-        all_context = context_final_ta.pack()
+        all_output = output_final_ta.stack()
+        all_context = context_final_ta.stack()
 
         all_output.set_shape([None, None, output_size])
 
@@ -323,7 +324,7 @@ class rnnsearch:
             encoder_outputs, encoder_output_states = outputs
 
             # compute initial state for decoder
-            annotation = tf.concat(2, encoder_outputs)
+            annotation = tf.concat(encoder_outputs, 2)
             final_state = encoder_output_states[-1]
 
             with tf.variable_scope("decoder"):
@@ -338,11 +339,11 @@ class rnnsearch:
             # compute costs
             batch = tf.shape(tgt_seq)[1]
             zero_embedding = tf.zeros([1, batch, tedim], dtype=dtype)
-            shift_inputs = tf.concat(0, [zero_embedding, target_inputs])
+            shift_inputs = tf.concat([zero_embedding, target_inputs], 0)
             shift_inputs = shift_inputs[:-1, :, :]
 
-            all_states = tf.concat(0, [tf.expand_dims(initial_state, 0),
-                                       all_output])
+            all_states = tf.concat([tf.expand_dims(initial_state, 0),
+                                    all_output], 0)
             prev_states = all_states[:-1]
 
             shift_inputs = tf.reshape(shift_inputs, [-1, tedim])
@@ -355,14 +356,14 @@ class rnnsearch:
                 readout = linear(hidden, deephid, False,  scope="deepout")
                 logits = linear(readout, tvsize, True, scope="logits")
 
-                labels = tf.reshape(tgt_seq, [-1])
-                crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(logits,
-                                                                      labels)
-                crossent = tf.reshape(crossent, tf.shape(tgt_seq))
-                mask = tf.sequence_mask(tgt_len, dtype=dtype)
+            labels = tf.reshape(tgt_seq, [-1])
+            ce = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits,
+                                                                labels=labels)
+            ce = tf.reshape(ce, tf.shape(tgt_seq))
+            mask = tf.sequence_mask(tgt_len, dtype=dtype)
 
-                mask = tf.transpose(mask)
-                cost = tf.reduce_mean(tf.reduce_sum(crossent * mask, 0))
+            mask = tf.transpose(mask)
+            cost = tf.reduce_mean(tf.reduce_sum(ce * mask, 0))
 
         training_inputs = [src_seq, src_len, tgt_seq, tgt_len]
         training_outputs = [cost]

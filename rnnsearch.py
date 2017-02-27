@@ -42,7 +42,7 @@ def convert_data(data, voc, unk="UNK", eos="<eos>", time_major=True):
     maxlen = np.max(lens)
 
     batch_data = np.zeros((n, maxlen), "int32")
-    data_length = np.array(lens)
+    data_length = np.array(lens, "int32")
 
     for idx, item in enumerate(data):
         batch_data[idx, :lens[idx]] = item
@@ -614,7 +614,7 @@ def train(args):
 
         # create optimizer
         constraint = ["norm", option["norm"]]
-        optim = optimizer(model, algorithm=option["optimizer"],
+        optim = optimizer(model, algorithm=option["optimizer"], norm=True,
                           constraint=constraint, variables=variables)
 
         tf.global_variables_initializer().run()
