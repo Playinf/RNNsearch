@@ -3,6 +3,8 @@ An implementation of RNNsearch using Tensorflow, the model is the same
 with [GroundHog](https://github.com/lisa-groundhog/GroundHog), a
 [Theano version](https://github.com/XMUNLP/RNNsearch) is also available
 
+## Note
+This repository is deprecated. Please switch to new [repository](https://github.com/XMUNLP/RNNsearch).
 
 ## Usage
 
